@@ -176,7 +176,7 @@ def cmd(command: str | Command, cwd: str | Path | None = None) -> int | str:
 
     try:
         with command as com:
-            proc = com()
+            proc = com.run()
             if isinstance(proc, int):
                 if proc != 0:
                     print(toterm(f"Command failed with return code: {proc}", "red"))
