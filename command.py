@@ -93,7 +93,7 @@ class Command:
         """Set the command text."""
         if isinstance(value, str):
             self.command = value
-            self.text = shlex.quote(value.strip())
+            self.text = value.strip()
             self.args = shlex.split(self.text)
             self.name = self.args[0]
         else:
@@ -166,7 +166,7 @@ class Command:
 
 
         finally:
-            sleep(0)  # Give some time for the command to complete
+            sleep(1)  # Give some time for the command to complete
 
 def cmd(command: str | Command, cwd: str | Path | None = None) -> int | str:
     """Run a shell command."""
@@ -194,7 +194,7 @@ def cmd(command: str | Command, cwd: str | Path | None = None) -> int | str:
         raise e
 
 def main(args:str | list[str]=""):
-    if isinstance(args, list):
+    if isinstance(args, list | tuple):
         args = " ".join(shlex.quote(arg) for arg in args)
     return cmd(args)
 
