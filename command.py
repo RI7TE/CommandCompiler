@@ -1,21 +1,17 @@
-
 from __future__ import annotations
-import os
+import shlex
+import subprocess as sp
 import sys
 
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-import ujson as json
 
 
 sys.path.append(str(Path(__file__).absolute().parent))
 if TYPE_CHECKING:
     import typing
 
-import shlex
-import subprocess as sp
-
+from contextlib import contextmanager
 from time import sleep
 
 from colorama import Back, Fore, Style
@@ -41,40 +37,68 @@ def toterm(x, color:str="red"):
     return Fore.BLACK + Style.BRIGHT + x + Style.RESET_ALL
 
 
+def viz(*args, **kwargs):
+    """Visualize output with color."""
+    color = kwargs.pop("color", "red")
+    if args:
+        print(toterm(" ".join(map(str, args)), color))
+    else:
+        print(toterm("No output provided.", color))
+
+
+CURRENT_DIR = Path.cwd().absolute()
+
+
 class CommandError(Exception):
     """Custom exception for command errors."""
 
-    def __init__(self,cmd: str | None = None, errcode:int | None = None, *args,**kwds):
+    def __init__(
+        self, cmd: str | None = None, errcode: int | None = None, *args, **kwds
+    ):
         super().__init__(*args)
         self.error_code = errcode
         self.command = cmd
-        self.message = f"Command '{self.command}' failed with error: {self.error_code} {args[0] if args else ''}\n {' '.join(f"{k}={v}" for k, v in kwds.items())}" if args else f"Command '{self.command}' failed with error: {self.error_code}"
+        self.message = (
+            f"Command '{self.command}' failed with error: {self.error_code} {args[0] if args else ''}\n {' '.join(f'{k}={v}' for k, v in kwds.items())}"
+            if args
+            else f"Command '{self.command}' failed with error: {self.error_code}"
+        )
         self.args = args
 
     def __str__(self):
-        return f"CommandError: {self.message}"
+        return f"CommandError: {list(iter(self))}"
 
     def __iter__(self):
         """Iterate over the error message."""
         args = self.command, self.error_code, self.args, self.message
         yield from args
+
     def __repr__(self):
         """Return a string representation of the error."""
         return f"CommandError(command={self.command!r}, message={self.message!r}, args={self.args!r})"
+
+
 class Command:
-    def __init__(self, command: str, cwd: Path | str | None = None):
+    """A class to compile and run shell commands."""
+
+    def __init__(self, command: str, cwd: Path | str | None = None, delay: float = 0):
         self.command = command
-        self.text = command.strip()
         self.cwd = Path(cwd).absolute() if cwd else CURRENT_DIR
-        self.args = shlex.split(self.command.strip())
+        self.text = shlex.quote(self.command.strip()).strip()
+        self.args = shlex.split(self.text)
         self.name = self.args[0]
         self.error_code = 0
         self.error = None
+        self.output = None
+        self.delay = delay
+        self._slept = False
 
     def __str__(self):
         return self.text
+
     def __repr__(self):
         return f"Command(command={self.command!r}, cwd={self.cwd!r})"
+
     def __iter__(self):
         """Iterate over the command attributes."""
         yield self.command
@@ -82,127 +106,170 @@ class Command:
         yield self.text
         yield self.args
         yield self.name
-        yield self.error_code
+        yield self.return_code
         yield self.error
+        yield self.output
 
-    def __get__(self, instance, owner):
-        """Get the command text."""
-        return self.text
+    #    def __get__(self, instance, owner):
+    #        """Get the command text."""
+    #        return instance.text if instance.output is None else instance.output
+    #
 
-    def __set__(self, instance, value):
-        """Set the command text."""
-        if isinstance(value, str):
-            self.command = value
-            self.text = value.strip()
-            self.args = shlex.split(self.text)
-            self.name = self.args[0]
-        else:
-            raise ValueError("Command must be a string.")
-        self.error_code = 0
-        self.error = None
+    @property
+    def return_code(self):
+        """Get the return code of the command."""
+        return self.error_code
 
     def __enter__(self):
         """Enter the command context."""
-        return self
+        return self.run()
+
     def __exit__(self, exc_type, exc_value, traceback):
         """Exit the command context."""
         if exc_type is not None:
-            self.error_code = 1
+            self.error_code = exc_value.returncode if exc_value else 1
             self.error = exc_value
-            print(toterm(f"Command '{self.command}' failed with error: {exc_value}", "red"))
-        return False
+            print(
+                toterm(
+                    f"Command '{self.command}' failed with error: {exc_value}", "red"
+                )
+            )
+            return False
+        if self.error_code != 0:
+            print(
+                toterm(
+                    f"Command '{self.command}' failed with error code: {self.error_code}",
+                    "red",
+                )
+            )
+            return False
+        print(toterm(f"Command '{self.command}' executed successfully.", "green"))
+        if not self._slept:
+            sleep(self.delay)
+            self._slept = True
+        return True
 
+    def run(self) -> Command:
+        """Run the command."""
 
-    def __call__(self, *args, **kwargs):
-        with self:
-            extra_args = list(args) + [f"{k}={v}" for k, v in kwargs.items()]
-            full_cmd = self.args + list(map(str, extra_args))
-            return self.run(full_cmd)
-
-    def run(self, args=None) -> int | str:
-        if args is None:
-            args = self.args
         try:
             proc = sp.run(
-                args, check=True, capture_output=True, cwd=self.cwd, text=True
+                self.command,
+                check=True,
+                capture_output=True,
+                cwd=self.cwd,
+                shell=True,
+                text=True,
             )
+            self.args = shlex.split(proc.args)
+            if proc and proc.stderr:
+                print(toterm(f"Command stderr: {proc.stderr.strip()}", "yellow"))
+                self.error = proc.stderr.strip()
+            self.output = proc.stdout.strip() if proc.stdout else proc.stderr.strip()
+            self.error_code = proc.returncode
+            if self.error_code == 0:
+                print(
+                    toterm(f"Command '{self.command}' executed successfully.", "green")
+                )
             proc.check_returncode()
-
         except sp.CalledProcessError as e:
-            print(toterm(f"Command failed: {e}"))
+            viz(f"Command Error: {e}")
+            self.command = e.cmd
+            self.output = e.output.strip() if e.output else e.stderr.strip()
             self.error_code = e.returncode
-            self.error = e
-            raise CommandError(self.text, e.returncode, error=self.error) from e
+            self.error = e.stderr.strip()
+            raise CommandError(self.command, self.error_code, error=self.error) from e
         except FileNotFoundError as e:
+            viz(f"Command Error: {e}")
             self.error_code = e.errno
             self.error = e
-            print(toterm(f"Command Failed: {self.text}"), f"File not found: {e}")
+            self.output = f"File not found: 1. {e.filename}\n 2. {e.filename2}\t|\tOutput: {e.strerror}"
             raise CommandError(
-                self.text,
-                e.errno,
-                filename=e.filename,
-                other_filename=e.filename2,
+                self.command,
+                self.error_code,
+                output=self.output,
                 error=self.error,
             ) from e
         except Exception as e:
-            self.error_code = 1
+            viz(f"Command Error: {e}")
+            self.error_code = 69
             self.error = e
-            print(toterm(f"An error occurred: {e}"))
-            raise CommandError(self.text, 1, error=self.error) from e
+            self.output = f"A generic error occurred in Command class: {e}"
+            raise CommandError(
+                self.command, self.error_code, error=self.error, output=self.output
+            ) from e
         else:
-            if proc and proc.stderr:
-                print(toterm(f"Command stderr: {proc.stderr.strip()}", "yellow"))
             if proc and proc.returncode == 0:
                 print(toterm(f"Command succeeded: {self.text}", "blue"))
-                return proc.stdout.strip()
-            self.error_code = proc.returncode if proc else 69
-            self.error = f"Command Error: {self.text} did not complete successfully."
-            raise CommandError(
-                self.text,
-                self.error_code,
-                toterm(f"Command failed with return code: {self.error_code}", "red"),
-                error=self.error,
-            )
-
-
+            # return (
+            #    self.output
+            #    or f"Command '{self.text}' executed successfully: {list(self)}"
+            # )
+            return self
         finally:
-            sleep(1)  # Give some time for the command to complete
+            if not self._slept:
+                sleep(self.delay)
+                self._slept = True
+            else:
+                print(
+                    toterm(
+                        f"Command Output: '{self.output}'\n Command {self.text} completed with return code: {self.error_code}",
+                        "green",
+                    )
+                )
 
-def cmd(command: str | Command, cwd: str | Path | None = None) -> int | str:
+
+@contextmanager
+def cmd(
+    command: str, cwd: str | Path | None = None, **kwds
+) -> typing.Generator[Command, typing.Any, None]:
     """Run a shell command."""
-    proc = None
     cwd = Path(cwd).absolute() if cwd else CURRENT_DIR
-    command = Command(command=command, cwd=cwd) if isinstance(command, str) else command
 
     try:
-        with command as com:
-            proc = com.run()
-            if isinstance(proc, int):
-                if proc != 0:
-                    print(toterm(f"Command failed with return code: {proc}", "red"))
-                    raise CommandError(com.text, proc, error=com.error)
-            elif isinstance(proc, str):
-                if proc:
-                    print(toterm(f"Command output: {proc}", "green"))
-                else:
-                    print(toterm("Command executed successfully with no output.", "blue"))
-            return proc
-    except CommandError as e:
-        print(toterm(f"Command Error: {e.message}", "red"))
-        if e.error_code == 1:
-            print(toterm("Command failed. Please check the command and try again.", "yellow"))
-        raise e
+        with Command(command=command, cwd=cwd, **kwds) as comm:
+            yield comm
+    except sp.CalledProcessError as e:
+        raise CommandError(
+            command=e.cmd,
+            errcode=e.returncode,
+            error=e.stderr.strip() if e.stderr else e.output,
+            stdout=e.stdout.strip() if e.stdout else None,
+            stderr=e.stderr.strip() if e.stderr else None,
+            output=e.output.strip() if e.output else None,
+        ) from e
+    except Exception as e:
+        raise e from e
 
-def main(args:str | list[str]=""):
-    if isinstance(args, list | tuple):
-        args = " ".join(shlex.quote(arg) for arg in args)
-    return cmd(args)
+
+def test_fixture(command: str):
+    """Test the Command class."""
+    with cmd(f"{command}", cwd=CURRENT_DIR, delay=1) as c:
+        viz(f"Command: {c.command}")
+        viz("TEXT: ", c.text)
+        viz("ARGS: ", c.args)
+        viz("OUTPUT: ", c.output)
+        viz("Error", c.error)
+        viz("RETURN CODE: ", c.return_code)
+        viz("Error-Code", c.error_code)
+        viz(f"Working Directory: {c.cwd}")
+        print()
+    return c
+
+
+def test_command():
+    test_fixture("pwd")
+    test_fixture("ls")
+    test_fixture("echo 'Hello, World!'")
+    test_fixture("date")
+    test_fixture("whoami")
+    try:
+        test_fixture("non_existent_command")
+    except CommandError as e:
+        viz(f"Command failed: {e}")
 
 
 if __name__ == "__main__":
-    try:
-        output = main(sys.argv[1:])
-        if isinstance(output, str):
-            print(output)
-    except Exception:
-        sys.exit(1)
+    test_command()
+    viz("All tests passed.")
+    sys.exit(0)
